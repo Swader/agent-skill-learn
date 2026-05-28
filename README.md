@@ -18,6 +18,7 @@ The agent should pull out the useful pieces, avoid duplicates, replace stale car
 - Records reviews with 0-5 recall grades.
 - Schedules cards with a simple SM-2 style interval rule.
 - Imports and exports JSON when you need to inspect or move card batches.
+- Resolves one user-level default deck so cards can be added from any project.
 
 ## Layout
 
@@ -34,13 +35,29 @@ The repo root has this README for humans. The skill itself lives in `skills/agen
 ## Quick start
 
 ```bash
-python3 skills/agent-skill-learn/scripts/sr_tool.py init --db ./sr/cards.sqlite
-python3 skills/agent-skill-learn/scripts/sr_tool.py add-json --db ./sr/cards.sqlite --cards ./cards.json
-python3 skills/agent-skill-learn/scripts/sr_tool.py due --db ./sr/cards.sqlite --limit 10
-python3 skills/agent-skill-learn/scripts/sr_tool.py reveal --db ./sr/cards.sqlite --card-id slack-ea-token-owner
+python3 skills/agent-skill-learn/scripts/sr_tool.py configure --db /path/to/cards.sqlite
+python3 skills/agent-skill-learn/scripts/sr_tool.py where
+python3 skills/agent-skill-learn/scripts/sr_tool.py init
+python3 skills/agent-skill-learn/scripts/sr_tool.py add-json --cards ./cards.json
+python3 skills/agent-skill-learn/scripts/sr_tool.py due --limit 10
+python3 skills/agent-skill-learn/scripts/sr_tool.py reveal --card-id slack-ea-token-owner
 ```
 
 To install it for Codex, symlink or copy `skills/agent-skill-learn/` into your Codex skills directory.
+
+## Deck location
+
+The deck is meant to be personal, not tied to a checkout. If you omit `--db`,
+`sr_tool.py` resolves the path from:
+
+1. `AGENT_SKILL_LEARN_DB`, `LEARN_DB`, or `SR_DB_PATH`
+2. common harness env files such as `~/.codex/local.env`, `~/.claude/.env`, and `~/.cursor/.env`
+3. `~/.config/agent-skill-learn/config.json`
+4. an existing `./sr/cards.sqlite`
+5. `${XDG_DATA_HOME:-~/.local/share}/agent-skill-learn/cards.sqlite`
+
+Use `where` to see the active deck before adding cards from an unrelated
+project.
 
 ## Card format
 

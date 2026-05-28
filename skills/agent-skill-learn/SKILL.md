@@ -14,15 +14,42 @@ exports, not as the scheduling source of truth.
 Use `scripts/sr_tool.py` for deterministic deck operations:
 
 ```bash
-python3 scripts/sr_tool.py init --db ./sr/cards.sqlite
-python3 scripts/sr_tool.py add-json --db ./sr/cards.sqlite --cards ./cards.json
-python3 scripts/sr_tool.py due --db ./sr/cards.sqlite --limit 10
-python3 scripts/sr_tool.py reveal --db ./sr/cards.sqlite --card-id CARD
-python3 scripts/sr_tool.py record-review --db ./sr/cards.sqlite --card-id CARD --grade 4 --answer-file answer.txt
-python3 scripts/sr_tool.py export-json --db ./sr/cards.sqlite --out ./cards_export.json
+python3 scripts/sr_tool.py where
+python3 scripts/sr_tool.py init
+python3 scripts/sr_tool.py add-json --cards ./cards.json
+python3 scripts/sr_tool.py due --limit 10
+python3 scripts/sr_tool.py reveal --card-id CARD
+python3 scripts/sr_tool.py record-review --card-id CARD --grade 4 --answer-file answer.txt
+python3 scripts/sr_tool.py export-json --out ./cards_export.json
 ```
 
-If the deck path is unclear, use `./sr/cards.sqlite` in the current project.
+## Deck Resolution
+
+Treat learning as user-level state, not project-level state. If the user has an
+existing learn deck, append to it from any project instead of starting a new
+deck.
+
+Resolve the deck path in this order:
+
+1. Explicit `--db`.
+2. Environment variables: `AGENT_SKILL_LEARN_DB`, `LEARN_DB`, `SR_DB_PATH`.
+3. Harness env files when present: `~/.config/agent-skill-learn/.env`,
+   `~/.codex/local.env`, `~/.config/codex/local.env`, `~/.claude/.env`,
+   `~/.config/claude/local.env`, `~/.cursor/.env`, and
+   `~/.config/cursor/local.env`.
+4. User config: `~/.config/agent-skill-learn/config.json`.
+5. Existing project deck at `./sr/cards.sqlite`, only if it already exists.
+6. Default user deck: `${XDG_DATA_HOME:-~/.local/share}/agent-skill-learn/cards.sqlite`.
+
+Run `python3 scripts/sr_tool.py where` before adding cards if the active deck is
+unclear. To bind an existing deck as the user default, run:
+
+```bash
+python3 scripts/sr_tool.py configure --db /path/to/cards.sqlite
+```
+
+Do not create a fresh project-local deck unless the user explicitly asks for a
+project-scoped deck or passes `--db ./sr/cards.sqlite`.
 
 ## Adding Material
 

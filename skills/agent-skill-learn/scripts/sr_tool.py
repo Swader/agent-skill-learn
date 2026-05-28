@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -48,11 +49,114 @@ def semantic_key(front: str) -> str:
     return "-".join(words[:12]) or hashlib.sha1(front.encode()).hexdigest()[:12]
 
 
+def expand_path(value: str | Path) -> Path:
+    return Path(os.path.expandvars(str(value))).expanduser()
+
+
+def xdg_config_dir() -> Path:
+    return expand_path(os.environ.get("XDG_CONFIG_HOME", "~/.config")) / "agent-skill-learn"
+
+
+def xdg_data_dir() -> Path:
+    return expand_path(os.environ.get("XDG_DATA_HOME", "~/.local/share")) / "agent-skill-learn"
+
+
+DB_ENV_KEYS = ("AGENT_SKILL_LEARN_DB", "LEARN_DB", "SR_DB_PATH")
+
+
+def harness_env_files() -> list[Path]:
+    return [
+        xdg_config_dir() / ".env",
+        expand_path("~/.codex/local.env"),
+        expand_path("~/.config/codex/local.env"),
+        expand_path("~/.claude/.env"),
+        expand_path("~/.config/claude/local.env"),
+        expand_path("~/.cursor/.env"),
+        expand_path("~/.config/cursor/local.env"),
+    ]
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key in DB_ENV_KEYS and value:
+            values[key] = value
+    return values
+
+
+def config_json_path() -> Path:
+    return xdg_config_dir() / "config.json"
+
+
+def read_config_db_path() -> str | None:
+    path = config_json_path()
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    value = data.get("db_path") if isinstance(data, dict) else None
+    return str(value) if value else None
+
+
+def resolve_db(explicit_db: Path | None = None) -> tuple[Path, str]:
+    if explicit_db is not None:
+        return expand_path(explicit_db), "--db"
+
+    for key in DB_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            return expand_path(value), f"env:{key}"
+
+    for env_file in harness_env_files():
+        values = parse_env_file(env_file)
+        for key in DB_ENV_KEYS:
+            if key in values:
+                return expand_path(values[key]), f"{env_file}:{key}"
+
+    configured = read_config_db_path()
+    if configured:
+        return expand_path(configured), str(config_json_path())
+
+    project_deck = Path.cwd() / "sr" / "cards.sqlite"
+    if project_deck.exists():
+        return project_deck, "existing project deck"
+
+    return xdg_data_dir() / "cards.sqlite", "default user data dir"
+
+
+def write_config(db: Path) -> Path:
+    path = config_json_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"db_path": str(expand_path(db)), "updated_at": iso(now())}
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def connect(db: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    if column not in columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def create_schema(conn: sqlite3.Connection) -> None:
@@ -111,11 +215,16 @@ def create_schema(conn: sqlite3.Connection) -> None:
           new_front TEXT,
           new_back TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_cards_active_semantic ON cards(active, semantic_key);
         CREATE INDEX IF NOT EXISTS idx_card_state_due ON card_state(due_at);
         CREATE INDEX IF NOT EXISTS idx_reviews_card ON reviews(card_id, reviewed_at);
         """
     )
+    add_column_if_missing(conn, "cards", "semantic_key", "TEXT")
+    add_column_if_missing(conn, "cards", "supersedes_json", "TEXT NOT NULL DEFAULT '[]'")
+    rows = conn.execute("SELECT id, front FROM cards WHERE semantic_key IS NULL OR semantic_key = ''").fetchall()
+    for row in rows:
+        conn.execute("UPDATE cards SET semantic_key = ? WHERE id = ?", (semantic_key(row["front"]), row["id"]))
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_active_semantic ON cards(active, semantic_key)")
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '1')")
 
 
@@ -404,13 +513,35 @@ def stats(conn: sqlite3.Connection) -> None:
     print(json.dumps({"active_by_priority": {row["priority"]: row["n"] for row in priority}, "due_now": due_count, "reviews": reviews}, indent=2))
 
 
+def print_where(db: Path, source: str) -> None:
+    config_path = config_json_path()
+    existing_project = Path.cwd() / "sr" / "cards.sqlite"
+    print(
+        json.dumps(
+            {
+                "db": str(db),
+                "source": source,
+                "config_json": str(config_path),
+                "env_keys": list(DB_ENV_KEYS),
+                "env_files_checked": [str(path) for path in harness_env_files()],
+                "existing_project_deck": str(existing_project) if existing_project.exists() else None,
+            },
+            indent=2,
+        )
+    )
+
+
 def main() -> None:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--db", type=Path, default=Path("sr/cards.sqlite"))
+    common.add_argument("--db", type=Path, help="Override deck path. Defaults to the user-level learn config.")
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init", parents=[common])
+    configure = sub.add_parser("configure")
+    configure.add_argument("--db", type=Path, required=True)
+    sub.add_parser("where", parents=[common])
+
     add = sub.add_parser("add-json", parents=[common])
     add.add_argument("--cards", type=Path, required=True)
     add.add_argument("--deck")
@@ -437,13 +568,25 @@ def main() -> None:
     sub.add_parser("stats", parents=[common])
 
     args = parser.parse_args()
-    args.db.parent.mkdir(parents=True, exist_ok=True)
-    conn = connect(args.db)
+
+    if args.cmd == "configure":
+        db = expand_path(args.db)
+        path = write_config(db)
+        print(json.dumps({"config": str(path), "db": str(db)}, indent=2))
+        return
+
+    db, db_source = resolve_db(args.db)
+    if args.cmd == "where":
+        print_where(db, db_source)
+        return
+
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(db)
     create_schema(conn)
+    conn.commit()
 
     if args.cmd == "init":
-        conn.commit()
-        print(f"initialized {args.db}")
+        print(f"initialized {db}")
     elif args.cmd == "add-json":
         add_cards(conn, load_cards(args.cards), args.deck, not args.no_deactivate_duplicates)
     elif args.cmd == "due":
