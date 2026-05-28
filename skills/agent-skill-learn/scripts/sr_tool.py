@@ -42,7 +42,7 @@ def normalize_priority(priority) -> str:
 
 
 def semantic_key(front: str) -> str:
-    text = re.sub(r"`[^`]+`", " code ", front.lower())
+    text = re.sub(r"`([^`]+)`", lambda match: f" {match.group(1)} ", front.lower())
     text = re.sub(r"[^a-z0-9]+", " ", text)
     stop = {"what", "why", "how", "does", "do", "the", "a", "an", "is", "are", "to", "for", "of", "in", "and"}
     words = [word for word in text.split() if word not in stop]
@@ -62,6 +62,7 @@ def xdg_data_dir() -> Path:
 
 
 DB_ENV_KEYS = ("AGENT_SKILL_LEARN_DB", "LEARN_DB", "SR_DB_PATH")
+SEMANTIC_KEY_VERSION = "2"
 
 
 def harness_env_files() -> list[Path]:
@@ -221,11 +222,19 @@ def create_schema(conn: sqlite3.Connection) -> None:
     )
     add_column_if_missing(conn, "cards", "semantic_key", "TEXT")
     add_column_if_missing(conn, "cards", "supersedes_json", "TEXT NOT NULL DEFAULT '[]'")
-    rows = conn.execute("SELECT id, front FROM cards WHERE semantic_key IS NULL OR semantic_key = ''").fetchall()
+    version = conn.execute("SELECT value FROM meta WHERE key = 'semantic_key_version'").fetchone()
+    if not version or version["value"] != SEMANTIC_KEY_VERSION:
+        rows = conn.execute("SELECT id, front FROM cards").fetchall()
+    else:
+        rows = conn.execute("SELECT id, front FROM cards WHERE semantic_key IS NULL OR semantic_key = ''").fetchall()
     for row in rows:
         conn.execute("UPDATE cards SET semantic_key = ? WHERE id = ?", (semantic_key(row["front"]), row["id"]))
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_active_semantic ON cards(active, semantic_key)")
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '1')")
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES ('semantic_key_version', ?)",
+        (SEMANTIC_KEY_VERSION,),
+    )
 
 
 def initial_due(priority: str) -> datetime:
