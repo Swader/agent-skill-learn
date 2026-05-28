@@ -38,7 +38,10 @@ The repo root has this README for humans. The skill itself lives in `skills/agen
 python3 skills/agent-skill-learn/scripts/sr_tool.py configure --db /path/to/cards.sqlite
 python3 skills/agent-skill-learn/scripts/sr_tool.py where
 python3 skills/agent-skill-learn/scripts/sr_tool.py init
-python3 skills/agent-skill-learn/scripts/sr_tool.py add-json --cards ./cards.json
+python3 skills/agent-skill-learn/scripts/sr_tool.py search --query "slack token" --limit 10
+python3 skills/agent-skill-learn/scripts/sr_tool.py check-json --cards ./cards.json
+python3 skills/agent-skill-learn/scripts/sr_tool.py add-json --cards ./cards.json --dry-run --no-deactivate-duplicates
+python3 skills/agent-skill-learn/scripts/sr_tool.py add-json --cards ./cards.json --no-deactivate-duplicates
 python3 skills/agent-skill-learn/scripts/sr_tool.py due --limit 10
 python3 skills/agent-skill-learn/scripts/sr_tool.py reveal --card-id slack-ea-token-owner
 ```
@@ -58,6 +61,13 @@ The deck is meant to be personal, not tied to a checkout. If you omit `--db`,
 
 Use `where` to see the active deck before adding cards from an unrelated
 project.
+
+For ordinary post/doc ingestion, use `search`, `check-json`, and `add-json
+--dry-run` before the live add. `search` and `check-json` are read-only
+preflights; `check-json` fails nonzero for malformed proposed cards and reports
+duplicate matches across active cards in all decks. Use
+`--no-deactivate-duplicates` unless the new batch intentionally replaces known
+stale cards through explicit `supersedes`.
 
 ## Card format
 

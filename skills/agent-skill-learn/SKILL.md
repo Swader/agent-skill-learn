@@ -14,14 +14,22 @@ exports, not as the scheduling source of truth.
 Use `scripts/sr_tool.py` for deterministic deck operations:
 
 ```bash
+cd "$(dirname /path/to/agent-skill-learn/SKILL.md)"
 python3 scripts/sr_tool.py where
 python3 scripts/sr_tool.py init
-python3 scripts/sr_tool.py add-json --cards ./cards.json
+python3 scripts/sr_tool.py search --query "topic keywords" --limit 10
+python3 scripts/sr_tool.py check-json --cards ./cards.json
+python3 scripts/sr_tool.py add-json --cards ./cards.json --dry-run --no-deactivate-duplicates
+python3 scripts/sr_tool.py add-json --cards ./cards.json --no-deactivate-duplicates
 python3 scripts/sr_tool.py due --limit 10
 python3 scripts/sr_tool.py reveal --card-id CARD
 python3 scripts/sr_tool.py record-review --card-id CARD --grade 4 --answer-file answer.txt
 python3 scripts/sr_tool.py export-json --out ./cards_export.json
 ```
+
+`scripts/...` paths are relative to the directory containing this `SKILL.md`.
+Use that directory as the command working directory, or call the script by
+absolute path. Do not assume the repository root has a `scripts/` directory.
 
 ## Deck Resolution
 
@@ -62,13 +70,34 @@ When the user says something like `/learn add this post to cards`:
 3. Prefer basic Q/A cards. Use cloze cards only when the exact missing term,
    number, command, or invariant matters.
 4. Include source, tags, and priority.
-5. Search the existing deck for duplicates or outdated cards before adding.
-6. Update or supersede old cards when new content replaces them. Do not leave
+5. Run `sr_tool.py search --query "topic keywords"` instead of exporting the
+   whole deck just to inspect likely duplicates. `search` is read-only and
+   returns `[]` when no deck exists yet.
+6. Validate the generated JSON with `check-json`, then run `add-json --dry-run`
+   against a temporary copy before writing to the real deck. `check-json` is
+   read-only, fails nonzero for malformed proposed cards, and reports duplicate
+   matches across active cards in all decks.
+7. For normal article/note ingestion, pass `--no-deactivate-duplicates` unless
+   the new cards intentionally replace older cards. Use explicit `supersedes`
+   when replacing known stale cards.
+8. Update or supersede old cards when new content replaces them. Do not leave
    contradictory active cards.
-7. Run `sr_tool.py stats` and, when useful, `sr_tool.py export-json` after edits.
+9. Run `sr_tool.py stats` and, when useful, `sr_tool.py export-json` after edits.
 
 Read `references/card_quality.md` when converting a large source or when cards
 feel vague.
+
+Fast path for URL/post ingestion:
+
+```bash
+cd "$(dirname /path/to/agent-skill-learn/SKILL.md)"
+python3 scripts/sr_tool.py where
+python3 scripts/sr_tool.py search --query "author topic keyphrase" --limit 20
+python3 scripts/sr_tool.py check-json --cards /tmp/new_cards.json
+python3 scripts/sr_tool.py add-json --cards /tmp/new_cards.json --dry-run --no-deactivate-duplicates
+python3 scripts/sr_tool.py add-json --cards /tmp/new_cards.json --no-deactivate-duplicates
+python3 scripts/sr_tool.py stats
+```
 
 ## Card Shape
 

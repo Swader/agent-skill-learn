@@ -8,10 +8,13 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 
 def now() -> datetime:
@@ -151,6 +154,22 @@ def connect(db: Path) -> sqlite3.Connection:
     return conn
 
 
+def connect_readonly(db: Path) -> sqlite3.Connection:
+    uri = f"file:{quote(str(db), safe='/')}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
 def columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
@@ -257,7 +276,7 @@ def load_cards(path: Path) -> list[dict]:
     return data
 
 
-def add_cards(conn: sqlite3.Connection, cards: list[dict], deck: str | None, deactivate_duplicates: bool) -> None:
+def add_cards(conn: sqlite3.Connection, cards: list[dict], deck: str | None, deactivate_duplicates: bool, emit: bool = True) -> dict:
     stamp = iso(now())
     added = updated = superseded = 0
     for raw in cards:
@@ -392,7 +411,146 @@ def add_cards(conn: sqlite3.Connection, cards: list[dict], deck: str | None, dea
             )
         superseded += len(superseded_ids)
     conn.commit()
-    print(json.dumps({"added": added, "updated": updated, "superseded": superseded}, indent=2))
+    summary = {"added": added, "updated": updated, "superseded": superseded}
+    if emit:
+        print(json.dumps(summary, indent=2))
+    return summary
+
+
+def active_cards_columns(conn: sqlite3.Connection | None) -> set[str]:
+    if conn is None or not table_exists(conn, "cards"):
+        return set()
+    return columns(conn, "cards")
+
+
+def check_cards(conn: sqlite3.Connection | None, cards: list[dict], deck: str | None, limit: int) -> None:
+    duplicate_ids: dict[str, int] = {}
+    duplicate_semantic_keys: dict[str, list[str]] = {}
+    existing_ids = []
+    existing_semantic_matches = []
+    seen_ids: set[str] = set()
+    seen_keys: dict[str, str] = {}
+    missing = []
+    invalid = []
+    card_cols = active_cards_columns(conn)
+    has_cards = conn is not None and bool(card_cols)
+    can_check_ids = has_cards and "id" in card_cols
+    can_check_semantic = has_cards and {"id", "front"}.issubset(card_cols)
+
+    for index, raw in enumerate(cards):
+        if not isinstance(raw, dict):
+            invalid.append({"index": index, "error": "card must be a JSON object"})
+            continue
+        card_id = str(raw.get("id") or "").strip()
+        front = str(raw.get("front") or "").strip()
+        back = str(raw.get("back") or "").strip()
+        if not card_id or not front or not back:
+            missing.append({"index": index, "id": card_id, "front": front[:120], "has_back": bool(back)})
+            continue
+        try:
+            normalize_priority(raw.get("priority") or "P2")
+        except SystemExit as exc:
+            invalid.append({"index": index, "id": card_id, "error": str(exc)})
+        supersedes = raw.get("supersedes", [])
+        if not isinstance(supersedes, list):
+            invalid.append({"index": index, "id": card_id, "error": "supersedes must be a list when present"})
+        tags = raw.get("tags", [])
+        if not isinstance(tags, (list, str)):
+            invalid.append({"index": index, "id": card_id, "error": "tags must be a list or string when present"})
+
+        if card_id in seen_ids:
+            duplicate_ids[card_id] = duplicate_ids.get(card_id, 1) + 1
+        seen_ids.add(card_id)
+
+        skey = str(raw.get("semantic_key") or semantic_key(front))
+        if skey in seen_keys:
+            duplicate_semantic_keys.setdefault(skey, [seen_keys[skey]]).append(card_id)
+        else:
+            seen_keys[skey] = card_id
+
+        if can_check_ids:
+            active_select = ", active" if "active" in card_cols else ""
+            existing = conn.execute(f"SELECT id{active_select} FROM cards WHERE id = ?", (card_id,)).fetchone()
+            if existing:
+                existing_ids.append(
+                    {
+                        "id": existing["id"],
+                        "active": bool(existing["active"]) if "active" in existing.keys() else True,
+                    }
+                )
+
+        if can_check_semantic:
+            match_rows = semantic_matches(conn, card_cols, skey, card_id, limit)
+            if match_rows:
+                existing_semantic_matches.append(
+                    {
+                        "proposed_id": card_id,
+                        "semantic_key": skey,
+                        "matches": match_rows,
+                    }
+                )
+
+    ok = not missing and not invalid and not duplicate_ids and not duplicate_semantic_keys
+    print(
+        json.dumps(
+            {
+                "ok": ok,
+                "proposed_count": len(cards),
+                "deck_override": deck,
+                "db_checked": has_cards,
+                "duplicate_scope": "active cards across all decks",
+                "missing_required_fields": missing[:limit],
+                "invalid_cards": invalid[:limit],
+                "duplicate_ids": duplicate_ids,
+                "duplicate_semantic_keys": duplicate_semantic_keys,
+                "existing_id_matches": existing_ids[:limit],
+                "existing_semantic_matches": existing_semantic_matches[:limit],
+                "truncated": {
+                    "missing_required_fields": len(missing) > limit,
+                    "invalid_cards": len(invalid) > limit,
+                    "existing_id_matches": len(existing_ids) > limit,
+                    "existing_semantic_matches": len(existing_semantic_matches) > limit,
+                },
+            },
+            indent=2,
+        )
+    )
+    if not ok:
+        raise SystemExit(1)
+
+
+def semantic_matches(conn: sqlite3.Connection, card_cols: set[str], skey: str, proposed_id: str, limit: int) -> list[dict]:
+    select_fields = ["id", "front"]
+    for optional in ("deck", "source"):
+        if optional in card_cols:
+            select_fields.append(optional)
+    where = "WHERE id != ?"
+    params: list[object] = [proposed_id]
+    if "active" in card_cols:
+        where += " AND active = 1"
+    if "semantic_key" in card_cols:
+        where += " AND semantic_key = ?"
+        params.append(skey)
+    rows = conn.execute(
+        f"""
+        SELECT {", ".join(select_fields)}
+        FROM cards
+        {where}
+        ORDER BY id
+        """,
+        params,
+    ).fetchall()
+    matches = []
+    for row in rows:
+        if "semantic_key" not in card_cols and semantic_key(row["front"]) != skey:
+            continue
+        item = dict(row)
+        item.setdefault("deck", "")
+        item.setdefault("source", "")
+        matches.append(item)
+        if len(matches) >= limit:
+            break
+    return matches
 
 
 def sm2(old_interval: float, old_ease: float, reps: int, lapses: int, grade: int) -> tuple[float, float, int, int]:
@@ -515,11 +673,74 @@ def export_json(conn: sqlite3.Connection, out: Path) -> None:
     print(f"wrote {out}")
 
 
-def stats(conn: sqlite3.Connection) -> None:
+def stats_data(conn: sqlite3.Connection) -> dict:
     priority = conn.execute("SELECT priority, COUNT(*) n FROM cards WHERE active = 1 GROUP BY priority ORDER BY priority").fetchall()
     due_count = conn.execute("SELECT COUNT(*) n FROM cards c JOIN card_state s ON s.card_id = c.id WHERE c.active = 1 AND s.due_at <= ?", (iso(now()),)).fetchone()["n"]
     reviews = conn.execute("SELECT COUNT(*) n FROM reviews").fetchone()["n"]
-    print(json.dumps({"active_by_priority": {row["priority"]: row["n"] for row in priority}, "due_now": due_count, "reviews": reviews}, indent=2))
+    return {"active_by_priority": {row["priority"]: row["n"] for row in priority}, "due_now": due_count, "reviews": reviews}
+
+
+def stats(conn: sqlite3.Connection) -> None:
+    print(json.dumps(stats_data(conn), indent=2))
+
+
+def search_cards(conn: sqlite3.Connection, query: str, limit: int, include_back: bool) -> None:
+    if limit < 1:
+        raise SystemExit("--limit must be at least 1")
+    terms = [term.lower() for term in re.findall(r"[a-zA-Z0-9_:-]+", query) if term.strip()]
+    if not terms:
+        raise SystemExit("--query must contain at least one searchable term")
+    card_cols = active_cards_columns(conn)
+    if not card_cols:
+        print("[]")
+        return
+    required = {"id", "deck", "front", "back", "tags_json", "source", "priority"}
+    missing = sorted(required - card_cols)
+    if missing:
+        raise SystemExit(f"Deck schema is missing columns required for search: {', '.join(missing)}")
+
+    select_fields = ["id", "deck", "front", "back", "tags_json", "source", "priority"]
+    if "semantic_key" in card_cols:
+        select_fields.append("semantic_key")
+    where = "WHERE active = 1" if "active" in card_cols else ""
+    rows = conn.execute(
+        f"""
+        SELECT {", ".join(select_fields)}
+        FROM cards
+        {where}
+        ORDER BY CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END,
+                 id
+        """
+    ).fetchall()
+    matches = []
+    for row in rows:
+        haystack = " ".join(
+            [
+                row["id"],
+                row["deck"],
+                row["front"],
+                row["back"],
+                row["tags_json"],
+                row["source"],
+                row["semantic_key"] if "semantic_key" in row.keys() else semantic_key(row["front"]),
+            ]
+        ).lower()
+        if all(term in haystack for term in terms):
+            item = {
+                "id": row["id"],
+                "deck": row["deck"],
+                "front": row["front"],
+                "tags": json.loads(row["tags_json"]),
+                "source": row["source"],
+                "priority": row["priority"],
+                "semantic_key": row["semantic_key"] if "semantic_key" in row.keys() else semantic_key(row["front"]),
+            }
+            if include_back:
+                item["back"] = row["back"]
+            matches.append(item)
+            if len(matches) >= limit:
+                break
+    print(json.dumps(matches, indent=2))
 
 
 def print_where(db: Path, source: str) -> None:
@@ -555,6 +776,17 @@ def main() -> None:
     add.add_argument("--cards", type=Path, required=True)
     add.add_argument("--deck")
     add.add_argument("--no-deactivate-duplicates", action="store_true")
+    add.add_argument("--dry-run", action="store_true", help="Apply to a temporary copy and leave the configured deck unchanged.")
+
+    check = sub.add_parser("check-json", parents=[common])
+    check.add_argument("--cards", type=Path, required=True)
+    check.add_argument("--deck")
+    check.add_argument("--limit", type=int, default=20)
+
+    search = sub.add_parser("search", parents=[common])
+    search.add_argument("--query", required=True)
+    search.add_argument("--limit", type=int, default=20)
+    search.add_argument("--include-back", action="store_true")
 
     due_cmd = sub.add_parser("due", parents=[common])
     due_cmd.add_argument("--limit", type=int, default=10)
@@ -589,6 +821,53 @@ def main() -> None:
         print_where(db, db_source)
         return
 
+    if args.cmd == "search":
+        if not db.exists():
+            print("[]")
+            return
+        conn = connect_readonly(db)
+        try:
+            search_cards(conn, args.query, args.limit, args.include_back)
+        finally:
+            conn.close()
+        return
+
+    if args.cmd == "check-json":
+        cards = load_cards(args.cards)
+        conn = connect_readonly(db) if db.exists() else None
+        try:
+            check_cards(conn, cards, args.deck, args.limit)
+        finally:
+            if conn is not None:
+                conn.close()
+        return
+
+    if args.cmd == "add-json" and args.dry_run:
+        cards = load_cards(args.cards)
+        with tempfile.TemporaryDirectory(prefix="agent-skill-learn-") as temp_dir:
+            temp_db = Path(temp_dir) / "cards.sqlite"
+            if db.exists():
+                shutil.copy2(db, temp_db)
+            temp_conn = connect(temp_db)
+            try:
+                create_schema(temp_conn)
+                temp_conn.commit()
+                result = add_cards(temp_conn, cards, args.deck, not args.no_deactivate_duplicates, emit=False)
+                print(
+                    json.dumps(
+                        {
+                            "dry_run": True,
+                            "db": str(db),
+                            "result": result,
+                            "stats_after": stats_data(temp_conn),
+                        },
+                        indent=2,
+                    )
+                )
+            finally:
+                temp_conn.close()
+        return
+
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(db)
     create_schema(conn)
@@ -597,7 +876,8 @@ def main() -> None:
     if args.cmd == "init":
         print(f"initialized {db}")
     elif args.cmd == "add-json":
-        add_cards(conn, load_cards(args.cards), args.deck, not args.no_deactivate_duplicates)
+        cards = load_cards(args.cards)
+        add_cards(conn, cards, args.deck, not args.no_deactivate_duplicates)
     elif args.cmd == "due":
         due(conn, args.limit, args.tag, args.include_back)
     elif args.cmd == "reveal":
