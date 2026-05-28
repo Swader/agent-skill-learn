@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Skill Learn"
+  short_description: "Builds and reviews spaced repetition decks"
+  default_prompt: "Use $agent-skill-learn to add this note to my spaced repetition cards."
