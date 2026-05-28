@@ -65,8 +65,10 @@ Daily default:
 1. Ask 10 due cards.
 2. Wait for the answer.
 3. Show the correct answer.
-4. Grade recall from 0 to 5.
-5. Record the review and next due date.
+4. If the answer is "I don't know" or equivalent, give a short memory hook and
+   record recall as 0.
+5. Grade other answers from 0 to 5.
+6. Record the review and next due date.
 
 The `due` command does not print answers unless you explicitly pass
 `--include-back`. The skill asks one question at a time because that is the only

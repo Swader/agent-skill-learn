@@ -81,10 +81,13 @@ Run reviews as a tight loop:
 2. Ask exactly one question.
 3. Wait for the user's answer.
 4. Reveal the correct answer after every response with `reveal --card-id`.
-5. Estimate recall grade from the answer, then ask the user to override if they
+5. If the user answers "I don't know", "don't know", "idk", or a close
+   equivalent, reveal the answer, give one short memory hook for how to remember
+   it, and record recall as `0` without debating the grade.
+6. Estimate recall grade from any other answer, then ask the user to override if they
    disagree.
-6. Record the review and next due date.
-7. Ask the next due question, or offer more only after the requested count.
+7. Record the review and next due date.
+8. Ask the next due question, or offer more only after the requested count.
 
 Recall grading:
 
@@ -118,6 +121,7 @@ Card 3/10
 Question: ...
 
 Correct answer: ...
+Memory hook: ...
 Grade: 4. Next due: 2026-06-01.
 ```
 
