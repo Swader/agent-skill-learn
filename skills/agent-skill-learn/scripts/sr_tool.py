@@ -66,6 +66,11 @@ def xdg_data_dir() -> Path:
 
 DB_ENV_KEYS = ("AGENT_SKILL_LEARN_DB", "LEARN_DB", "SR_DB_PATH")
 SEMANTIC_KEY_VERSION = "2"
+CLOZE_RE = re.compile(r"\{\{c\d+::(.*?)(?:::(.*?))?\}\}")
+
+
+def prompt_front(front: str) -> str:
+    return CLOZE_RE.sub(lambda match: match.group(2) or "____", front)
 
 
 def harness_env_files() -> list[Path]:
@@ -587,7 +592,13 @@ def due(conn: sqlite3.Connection, limit: int, tag: str | None, include_back: boo
         """,
         params,
     ).fetchall()
-    print(json.dumps([dict(row) for row in rows], indent=2))
+    output = []
+    for row in rows:
+        item = dict(row)
+        if not include_back:
+            item["front"] = prompt_front(item["front"])
+        output.append(item)
+    print(json.dumps(output, indent=2))
 
 
 def reveal(conn: sqlite3.Connection, card_id: str) -> None:

@@ -132,10 +132,12 @@ Stable ids should survive rebuilds. Use a domain prefix plus a short slug:
 
 Run reviews as a tight loop:
 
-1. Select due cards, default 10. `due` omits answers by default so the review
-   loop does not leak the back side.
+1. Select due cards, default 10. `due` omits answers by default and renders
+   cloze answers as blanks so the review loop does not leak the back side or
+   hidden cloze terms.
 2. Ask exactly one question.
-3. Wait for the user's answer.
+3. Wait for the user's answer. Never display raw cloze markup like
+   `{{c1::answer}}` as the question; render it as a blank or hint first.
 4. Reveal the correct answer after every response with `reveal --card-id`.
 5. If the user answers "I don't know", "don't know", "idk", or a close
    equivalent, reveal the answer, give one short memory hook for how to remember
